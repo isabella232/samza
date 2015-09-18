@@ -31,6 +31,7 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration
 import org.apache.hadoop.yarn.util.ConverterUtils
 import org.apache.samza.Partition
 import org.apache.samza.config.Config
+import org.apache.samza.config.YarnConfig
 import org.apache.samza.config.YarnConfig.Config2Yarn
 import org.apache.samza.config.MapConfig
 import org.apache.samza.metrics.MetricsRegistry
@@ -38,6 +39,7 @@ import org.apache.samza.system.SystemFactory
 import org.apache.samza.system.SystemStreamPartition
 import org.apache.samza.util.Util
 import org.junit.Test
+import org.mockito.Mockito
 import scala.collection.JavaConversions._
 import TestSamzaAppMasterTaskManager._
 import java.net.URL
@@ -135,6 +137,73 @@ object TestSamzaAppMasterTaskManager {
         null
       }
     }
+}
+
+class TestSamzaAppMasterTaskManagerTotalContainersGreaterThanCombinedContainers {
+  import org.junit.Assert._
+
+  val clock = () => System.currentTimeMillis
+
+  val config = new YarnConfig(new MapConfig(Map[String, String](
+    "yarn.container.count" -> "2",
+    "yarn.container.combined.count" -> "1",
+    "systems.test-system.samza.factory" -> "org.apache.samza.job.yarn.MockSystemFactory",
+    "yarn.container.memory.mb" -> "512",
+    "yarn.package.path" -> "/foo",
+    "task.inputs" -> "test-system.test-stream",
+    "systems.test-system.samza.key.serde" -> "org.apache.samza.serializers.JsonSerde",
+    "systems.test-system.samza.msg.serde" -> "org.apache.samza.serializers.JsonSerde",
+    "yarn.container.retry.count" -> "1",
+    "yarn.container.retry.window.ms" -> "1999999999")))
+
+
+  @Test
+  def testVerifyContainerCountsGreaterThanCombined {
+    val amClient = getAmClient(new TestAMRMClientImpl(getAppMasterResponse(false, List(), List())))
+    val state = new SamzaAppMasterState(-1, ConverterUtils.toContainerId("container_1350670447861_0003_01_000002"), "", 1, 2)
+    val taskManager = new SamzaAppMasterTaskManager(clock, config, state, amClient, new YarnConfiguration)
+
+    taskManager.onInit
+
+    assertEquals(Set(1),state.unclaimedTasks)
+    assertEquals(1,state.neededContainers)
+
+  }
+
+
+}
+
+class TestSamzaAppMasterTaskManagerEqualTotalAndCombinedContainers {
+  import org.junit.Assert._
+
+  val clock = () => System.currentTimeMillis
+
+  val config = new MapConfig(Map[String, String](
+    "yarn.container.count" -> "1",
+    "yarn.container.combined.count" -> "1",
+    "systems.test-system.samza.factory" -> "org.apache.samza.job.yarn.MockSystemFactory",
+    "yarn.container.memory.mb" -> "512",
+    "yarn.package.path" -> "/foo",
+    "task.inputs" -> "test-system.test-stream",
+    "systems.test-system.samza.key.serde" -> "org.apache.samza.serializers.JsonSerde",
+    "systems.test-system.samza.msg.serde" -> "org.apache.samza.serializers.JsonSerde",
+    "yarn.container.retry.count" -> "1",
+    "yarn.container.retry.window.ms" -> "1999999999"))
+
+
+  @Test
+  def testVerifyContainerCountsEqualToCombined {
+    val state = new SamzaAppMasterState(-1, ConverterUtils.toContainerId("container_1350670447861_0003_01_000001"), "", 1, 2)
+    val taskManager = new SamzaAppMasterTaskManager(clock, config, state, null, new YarnConfiguration)
+
+    taskManager.onInit
+
+    assertEquals(0,state.neededContainers)
+    assertEquals(Set(),state.unclaimedTasks)
+
+  }
+
+
 }
 
 class TestSamzaAppMasterTaskManager {

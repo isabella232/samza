@@ -18,8 +18,20 @@
  */
 
 buildscript {
+  def ARTIFACTORY_URL = System.env.ARTIFACTORY_URL
+  def ARTIFACTORY_REPOSITORY = System.env.ARTIFACTORY_REPOSITORY
+  def ARTIFACTORY_USER = System.env.ARTIFACTORY_USER
+  def ARTIFACTORY_PASSWORD = System.env.ARTIFACTORY_PASSWORD
+
   repositories {
     mavenCentral()
+    maven {
+         url "$ARTIFACTORY_URL/ext-snapshot-local"
+         credentials {
+             username = "$ARTIFACTORY_USER"
+             password = "$ARTIFACTORY_PASSWORD"
+         }
+    }
   }
 
   apply from: file('gradle/buildscript.gradle'), to: buildscript
@@ -93,11 +105,53 @@ allprojects {
   tasks.withType(ScalaCompile) {
     scalaCompileOptions.additionalParameters = [ scalaOptions ]
   }
+
+  tasks.withType(JavaCompile) {
+        options.compilerArgs << "-Xlint:unchecked" << "-Xlint:deprecation"
+  } 
+
 }
 
 subprojects {
   apply plugin: 'eclipse'
   apply plugin: 'project-report'
+  apply plugin: 'maven-publish'
+  apply plugin: 'com.jfrog.artifactory'
+
+  version = version 
+
+  def ARTIFACTORY_URL = System.env.ARTIFACTORY_URL
+  def ARTIFACTORY_REPOSITORY = System.env.ARTIFACTORY_REPOSITORY
+  def ARTIFACTORY_USER = System.env.ARTIFACTORY_USER
+  def ARTIFACTORY_PASSWORD = System.env.ARTIFACTORY_PASSWORD
+
+  artifactory {
+    contextUrl = "$ARTIFACTORY_URL"
+    publish {
+        repository {
+            repoKey = "$ARTIFACTORY_REPOSITORY-local"
+            username = "$ARTIFACTORY_USER"
+            password = "$ARTIFACTORY_PASSWORD"
+            maven = true
+        }
+    }
+    resolve {
+        repository {
+            repoKey = "$ARTIFACTORY_REPOSITORY"
+            username = "$ARTIFACTORY_USER"
+            password = "$ARTIFACTORY_PASSWORD"
+            maven = true
+        }
+    }
+  }
+
+  artifactory {
+    publish {
+        defaults {
+            publications ('mavenJava')
+        }
+    }
+  }
 
   tasks.withType(Test) {
     test {
@@ -137,6 +191,8 @@ project(":samza-core_$scalaVersion") {
     compile "net.sf.jopt-simple:jopt-simple:$joptSimpleVersion"
     compile "org.codehaus.jackson:jackson-mapper-asl:$jacksonVersion"
     compile "org.eclipse.jetty:jetty-webapp:$jettyVersion"
+    compile "mysql:mysql-connector-java:5.1.36"
+
     testCompile "junit:junit:$junitVersion"
     testCompile "org.mockito:mockito-all:$mockitoVersion"
     testCompile "org.scalatest:scalatest_$scalaVersion:$scalaTestVersion"
@@ -209,7 +265,9 @@ project(":samza-yarn_$scalaVersion") {
     compile "org.scala-lang:scala-library:$scalaLibVersion"
     compile "org.scala-lang:scala-compiler:$scalaLibVersion"
     compile "org.codehaus.jackson:jackson-mapper-asl:$jacksonVersion"
+    compile "com.fasterxml.jackson.module:jackson-module-scala_$scalaVersion:2.6.1"
     compile "commons-httpclient:commons-httpclient:$commonsHttpClientVersion"
+    compile "mysql:mysql-connector-java:5.1.36"
     compile("org.apache.hadoop:hadoop-yarn-api:$yarnVersion") {
       exclude module: 'slf4j-log4j12'
     }

@@ -64,25 +64,33 @@ import org.apache.samza.serializers._
 
 object SamzaContainer extends Logging {
   def main(args: Array[String]) {
-    safeMain(() => new JmxServer, new SamzaContainerExceptionHandler(() => System.exit(1)))
+    val containerId = System.getenv(ShellCommandConfig.ENV_CONTAINER_ID).toInt
+    logger.info("Got container ID: %s" format containerId)
+    val coordinatorUrl = System.getenv(ShellCommandConfig.ENV_COORDINATOR_URL)
+    logger.info("Got coordinator URL: %s" format coordinatorUrl)
+
+    safeMain(containerId, coordinatorUrl, () => jmxServer, exceptionHandler )
   }
 
+  def jmxServer = new JmxServer
+
+  def exceptionHandler = new SamzaContainerExceptionHandler(() => System.exit(1))
+
   def safeMain(
+    containerId: Int,
+    coordinatorUrl: String,
     newJmxServer: () => JmxServer,
     exceptionHandler: UncaughtExceptionHandler = null) {
     if (exceptionHandler != null) {
       Thread.setDefaultUncaughtExceptionHandler(exceptionHandler)
     }
-    putMDC("containerName", "samza-container-" + System.getenv(ShellCommandConfig.ENV_CONTAINER_ID))
+    putMDC("containerName", "samza-container-" + containerId)
     // Break out the main method to make the JmxServer injectable so we can
     // validate that we don't leak JMX non-daemon threads if we have an
     // exception in the main method.
-    val containerId = System.getenv(ShellCommandConfig.ENV_CONTAINER_ID).toInt
-    logger.info("Got container ID: %s" format containerId)
-    val coordinatorUrl = System.getenv(ShellCommandConfig.ENV_COORDINATOR_URL)
-    logger.info("Got coordinator URL: %s" format coordinatorUrl)
+   
     val jobModel = readJobModel(coordinatorUrl)
-    val containerModel = jobModel.getContainers()(containerId.toInt)
+    val containerModel = jobModel.getContainers()(containerId)
     val config = jobModel.getConfig
     putMDC("jobName", config.getName.getOrElse(throw new SamzaException("can not find the job name")))
     putMDC("jobId", config.getJobId.getOrElse("1"))

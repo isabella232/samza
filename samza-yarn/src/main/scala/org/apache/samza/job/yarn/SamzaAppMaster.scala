@@ -34,12 +34,24 @@ import org.apache.samza.config.YarnConfig
 import org.apache.samza.config.YarnConfig.Config2Yarn
 import org.apache.samza.job.yarn.SamzaAppMasterTaskManager.DEFAULT_CONTAINER_MEM
 import org.apache.samza.job.yarn.SamzaAppMasterTaskManager.DEFAULT_CPU_CORES
+import org.apache.samza.job.yarn.SamzaAppMasterTaskManager.DEFAULT_CONTAINER_COMBINED_COUNT
 import org.apache.samza.metrics.JmxServer
 import org.apache.samza.metrics.MetricsRegistryMap
 import org.apache.samza.util.hadoop.HttpFileSystem
 import org.apache.samza.util.Logging
 import org.apache.samza.serializers.model.SamzaObjectMapper
 import org.apache.samza.SamzaException
+import org.apache.samza.container.SamzaContainer
+
+
+class ContainerThread(val containerId: Int, val coordinatorUrl: String) extends Thread{
+
+    override def run {
+      SamzaContainer.safeMain(containerId, coordinatorUrl, () => SamzaContainer.jmxServer, SamzaContainer.exceptionHandler )
+
+    }
+
+}
 
 /**
  * When YARN executes an application master, it needs a bash command to
@@ -56,6 +68,10 @@ object SamzaAppMaster extends Logging with AMRMClientAsync.CallbackHandler {
   val DEFAULT_POLL_INTERVAL_MS: Int = 1000
   var listeners: List[YarnAppMasterListener] = null
   var storedException: Throwable = null
+
+  var containerThreads: List[Thread] = List[Thread]() 
+
+  var state: SamzaAppMasterState = null
 
   def main(args: Array[String]) {
     putMDC("containerName", "samza-application-master")
@@ -77,22 +93,25 @@ object SamzaAppMaster extends Logging with AMRMClientAsync.CallbackHandler {
     val hConfig = new YarnConfiguration
     hConfig.set("fs.http.impl", classOf[HttpFileSystem].getName)
     val interval = config.getAMPollIntervalMs.getOrElse(DEFAULT_POLL_INTERVAL_MS)
+    val combinedContainerCount = config.getCombinedContainerCount.getOrElse(DEFAULT_CONTAINER_COMBINED_COUNT) - 1
     val amClient = AMRMClientAsync.createAMRMClientAsync[ContainerRequest](interval, this)
     val clientHelper = new ClientHelper(hConfig)
     val registry = new MetricsRegistryMap
     val containerMem = config.getContainerMaxMemoryMb.getOrElse(DEFAULT_CONTAINER_MEM)
     val containerCpu = config.getContainerMaxCpuCores.getOrElse(DEFAULT_CPU_CORES)
-    val jmxServer = if (new YarnConfig(config).getJmxServerEnabled) Some(new JmxServer()) else None
-
+    val yarnConfig = new YarnConfig(config)
+    val jmxServer = if (yarnConfig.getJmxServerEnabled) Some(new JmxServer()) else None
+    
     try {
       // wire up all of the yarn event listeners
-      val state = new SamzaAppMasterState(-1, containerId, nodeHostString, nodePortString.toInt, nodeHttpPortString.toInt)
+      state = new SamzaAppMasterState(-1, containerId, nodeHostString, nodePortString.toInt, nodeHttpPortString.toInt)
       val service = new SamzaAppMasterService(config, state, registry, clientHelper)
       val lifecycle = new SamzaAppMasterLifecycle(containerMem, containerCpu, state, amClient)
       val metrics = new SamzaAppMasterMetrics(config, state, registry)
       val am = new SamzaAppMasterTaskManager({ System.currentTimeMillis }, config, state, amClient, hConfig)
       listeners = List(state, service, lifecycle, metrics, am)
-      run(amClient, listeners, hConfig, interval)
+      run(amClient, listeners, hConfig, combinedContainerCount, interval)
+ 
     } finally {
       // jmxServer has to be stopped or will prevent process from exiting.
       if (jmxServer.isDefined) {
@@ -101,15 +120,36 @@ object SamzaAppMaster extends Logging with AMRMClientAsync.CallbackHandler {
     }
   }
 
-  def run(amClient: AMRMClientAsync[ContainerRequest], listeners: List[YarnAppMasterListener], hConfig: YarnConfiguration, interval: Int): Unit = {
+  def containerFactory(containerId: Int): ContainerThread = {
+    info("ContainerId %s URL %s" format (containerId,SamzaAppMaster.state.coordinatorUrl.toString))
+    new ContainerThread(containerId,SamzaAppMaster.state.coordinatorUrl.toString)
+  }
+
+  def run(amClient: AMRMClientAsync[ContainerRequest], listeners: List[YarnAppMasterListener], hConfig: YarnConfiguration, combinedContainerCount: Int, interval: Int): Unit = {
     try {
       amClient.init(hConfig)
       amClient.start
       listeners.foreach(_.onInit)
+
+      // start threaded containers 
+      info("Starting container 0 to %s" format (combinedContainerCount))
+      containerThreads = (0 to combinedContainerCount).map(containerFactory(_)).toList
+      containerThreads.map(_.start)
+
       var isShutdown: Boolean = false
       // have the loop to prevent the process from exiting until the job is to shutdown or error occurs on amClient
       while (!isShutdown && !listeners.map(_.shouldShutdown).reduceLeft(_ || _) && storedException == null) {
+
         try {
+          for( (containerThread,containerId) <- containerThreads.zipWithIndex){
+            if(! containerThread.isAlive() ){
+              var containerThread = containerFactory(containerId)
+              containerThread.start
+              containerThreads = containerThreads.patch(containerId,Seq(containerThread),1)
+            }
+
+          }
+
           Thread.sleep(interval)
         } catch {
           case e: InterruptedException => {
@@ -125,6 +165,9 @@ object SamzaAppMaster extends Logging with AMRMClientAsync.CallbackHandler {
       } catch {
         case e: Exception => warn("Listener %s failed to shutdown." format listener, e)
       })
+
+      containerThreads.map(_.interrupt)
+
       // amClient has to be stopped
       amClient.stop
     }

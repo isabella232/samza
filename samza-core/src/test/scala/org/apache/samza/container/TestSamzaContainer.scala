@@ -156,7 +156,7 @@ class TestSamzaContainer extends AssertionsForJUnit {
       }
     }
     try {
-      SamzaContainer.safeMain(() => null, exceptionHandler)
+      SamzaContainer.safeMain(1,"http://localhost",() => null, exceptionHandler)
     } catch {
       case _: Exception =>
       // Expect some random exception from SamzaContainer because we haven't 

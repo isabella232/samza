@@ -19,6 +19,7 @@
 
 package org.apache.samza.job.yarn
 
+import java.net.URL
 import java.nio.ByteBuffer
 import java.util.Collections
 import scala.collection.JavaConversions._
@@ -50,6 +51,7 @@ object SamzaAppMasterTaskManager {
   val DEFAULT_CPU_CORES = 1
   val DEFAULT_CONTAINER_RETRY_COUNT = 8
   val DEFAULT_CONTAINER_RETRY_WINDOW_MS = 300000
+  val DEFAULT_CONTAINER_COMBINED_COUNT = 0
 }
 
 case class TaskFailure(val count: Int, val lastFailure: Long)
@@ -79,13 +81,18 @@ class SamzaAppMasterTaskManager(clock: () => Long, config: Config, state: SamzaA
   override def shouldShutdown = state.completedTasks == state.taskCount || tooManyFailedContainers
 
   override def onInit() {
-    state.neededContainers = state.taskCount
-    state.unclaimedTasks = state.jobCoordinator.jobModel.getContainers.keySet.map(_.toInt).toSet
+    val combinedContainers = config.getCombinedContainerCount.getOrElse(DEFAULT_CONTAINER_COMBINED_COUNT) - 1
+    val combinedContainerSet = (0 to combinedContainers).map(_.toInt).toSet
+
+    debug("Task Id %s Combined %s Combined Set %s count %s" format (state.taskCount, combinedContainers,combinedContainerSet,combinedContainerSet.size()))
+
+    state.neededContainers =  state.taskCount - combinedContainerSet.size()
+    state.unclaimedTasks = state.jobCoordinator.jobModel.getContainers.keySet.map(_.toInt).toSet -- combinedContainerSet
     containerManager = NMClient.createNMClient()
     containerManager.init(conf)
     containerManager.start
 
-    info("Requesting %s containers" format state.taskCount)
+    info("Requesting %s containers, unclaimed containers %s" format (state.neededContainers,state.unclaimedTasks))
 
     requestContainers(config.getContainerMaxMemoryMb.getOrElse(DEFAULT_CONTAINER_MEM), config.getContainerMaxCpuCores.getOrElse(DEFAULT_CPU_CORES), state.neededContainers)
   }
@@ -110,7 +117,7 @@ class SamzaAppMasterTaskManager(clock: () => Long, config: Config, state: SamzaA
         val cmdBuilder = Class.forName(cmdBuilderClassName).newInstance.asInstanceOf[CommandBuilder]
           .setConfig(config)
           .setId(taskId)
-          .setUrl(state.coordinatorUrl)
+          .setUrl(new URL(state.coordinatorUrl.toString))
         val command = cmdBuilder.buildCommand
         info("Task ID %s using command %s" format (taskId, command))
         val env = cmdBuilder.buildEnvironment.map { case (k, v) => (k, Util.envVarEscape(v)) }
@@ -123,6 +130,7 @@ class SamzaAppMasterTaskManager(clock: () => Long, config: Config, state: SamzaA
           container,
           env.toMap,
           "export SAMZA_LOG_DIR=%s && ln -sfn %s logs && exec ./__package/%s 1>logs/%s 2>logs/%s" format (ApplicationConstants.LOG_DIR_EXPANSION_VAR, ApplicationConstants.LOG_DIR_EXPANSION_VAR, command, ApplicationConstants.STDOUT, ApplicationConstants.STDERR))
+        
 
         state.neededContainers -= 1
         if (state.neededContainers == 0) {
@@ -134,6 +142,7 @@ class SamzaAppMasterTaskManager(clock: () => Long, config: Config, state: SamzaA
         info("Claimed task ID %s for container %s on node %s (http://%s/node/containerlogs/%s)." format (taskId, containerIdStr, container.getNodeId.getHost, container.getNodeHttpAddress, containerIdStr))
 
         info("Started task ID %s" format taskId)
+        
       }
       case _ => {
         // there are no more tasks to run, so release the container
@@ -308,6 +317,9 @@ class SamzaAppMasterTaskManager(clock: () => Long, config: Config, state: SamzaA
   }
 
   protected def requestContainers(memMb: Int, cpuCores: Int, containers: Int) {
+    if (containers == 0) {
+      return
+    }
     info("Requesting %d container(s) with %dmb of memory" format (containers, memMb))
     val capability = Records.newRecord(classOf[Resource])
     val priority = Records.newRecord(classOf[Priority])
